@@ -51,30 +51,57 @@ jobs:
       working-directory: ./rule/
     - name: Commit and push rules
       run: |
+        set -Eeuo pipefail
+
         git config --global user.email "action@github.com"
         git config --global user.name "GitHub Action"
+        git fetch origin main rules latest_rules
+
+        TMP_RULE_DIR="$(mktemp -d)"
+        cp ./rule/*.json "$TMP_RULE_DIR"/
+        cp ./rule/*.srs "$TMP_RULE_DIR"/
+        cp ./rule/*.txt "$TMP_RULE_DIR"/
+
+        if git diff --quiet origin/main origin/rules -- . ':(exclude)rule/*.json' ':(exclude)rule/*.srs' ':(exclude)rule/*.txt'; then
+          echo "main has no non-rule changes; append to rules history"
+          RULES_BASE_REF="origin/rules"
+          RULES_FORCE_PUSH="false"
+        else
+          echo "main changed; reset rules branch to main before committing"
+          RULES_BASE_REF="origin/main"
+          RULES_FORCE_PUSH="true"
+        fi
+
+        git checkout -f -B rules "$RULES_BASE_REF"
+        mkdir -p ./rule
+        cp "$TMP_RULE_DIR"/*.json ./rule/
+        cp "$TMP_RULE_DIR"/*.srs ./rule/
+        cp "$TMP_RULE_DIR"/*.txt ./rule/
+
         git add ./rule/*.json
         git add ./rule/*.srs
         git add ./rule/*.txt
 
-        # 检查是否有文件被修改
         if git diff --staged --quiet; then
           echo "No changes to commit"
           exit 0
-        else
-          git commit -m "Update rules"
-          RULES_COMMIT="$(git rev-parse HEAD)"
-
-          # 1) Push commit to rules branch
-          git push origin HEAD:rules
-
-          # 2) Recreate latest_rules as a single latest snapshot commit (no growing history)
-          git checkout --orphan latest_rules
-          git rm -rf . >/dev/null 2>&1 || true
-          git checkout "$RULES_COMMIT" -- .
-          git add ./rule/*.json
-          git add ./rule/*.srs
-          git add ./rule/*.txt
-          git commit -m "Update latest rules"
-          git push --force origin HEAD:latest_rules
         fi
+
+        git commit -m "Update rules"
+        RULES_COMMIT="$(git rev-parse HEAD)"
+
+        if [ "$RULES_FORCE_PUSH" = "true" ]; then
+          git push --force-with-lease origin HEAD:rules
+        else
+          git push origin HEAD:rules
+        fi
+
+        # Recreate latest_rules as a single latest snapshot commit.
+        git checkout --orphan latest_rules
+        git rm -rf . >/dev/null 2>&1 || true
+        git checkout "$RULES_COMMIT" -- .
+        git add ./rule/*.json
+        git add ./rule/*.srs
+        git add ./rule/*.txt
+        git commit -m "Update latest rules"
+        git push --force origin HEAD:latest_rules
