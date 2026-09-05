@@ -1,0 +1,107 @@
+name: Config Update
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 12 * * *'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: "Setup sing-box"
+      env:
+        SING_BOX_DEB_URL: "https://github.com/SagerNet/sing-box/releases/download/v1.13.1/sing-box_1.13.1_linux_amd64.deb"
+      run: |
+          set -Eeuo pipefail
+          wget -O sing-box.deb $SING_BOX_DEB_URL
+          sudo dpkg -i sing-box.deb
+    - name: Set up Python3
+      uses: actions/setup-python@v2
+      with:
+        python-version: 3.x
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pandas requests pyyaml
+    - name: Download content
+      run: |
+        URL="https://raw.githubusercontent.com/AdguardTeam/AdguardFilters/master/BaseFilter/sections/adservers.txt"
+        OUTPUT_FILE="./rule/adservers.txt"
+
+        curl -L $URL -o $OUTPUT_FILE
+
+        if [ -f "$OUTPUT_FILE" ]; then
+          echo "Download successful: $OUTPUT_FILE"
+        else
+          echo "Download failed."
+          exit 1
+        fi
+    - name: Convert AdGuard DNS Filter to sing-box rule set
+      run: |
+        sing-box rule-set convert --type adguard --output ./rule/adservers.srs ./rule/adservers.txt
+    - name: Run script
+      run: python ../main.py
+      working-directory: ./rule/
+    - name: Commit and push rules
+      run: |
+        set -Eeuo pipefail
+
+        git config --global user.email "action@github.com"
+        git config --global user.name "GitHub Action"
+        git fetch origin main rules latest_rules
+
+        TMP_RULE_DIR="$(mktemp -d)"
+        cp ./rule/*.json "$TMP_RULE_DIR"/
+        cp ./rule/*.srs "$TMP_RULE_DIR"/
+        cp ./rule/*.txt "$TMP_RULE_DIR"/
+
+        if git diff --quiet origin/main origin/rules -- . ':(exclude)rule/*.json' ':(exclude)rule/*.srs' ':(exclude)rule/*.txt'; then
+          echo "main has no non-rule changes; append to rules history"
+          RULES_BASE_REF="origin/rules"
+          RULES_FORCE_PUSH="false"
+        else
+          echo "main changed; reset rules branch to main before committing"
+          RULES_BASE_REF="origin/main"
+          RULES_FORCE_PUSH="true"
+        fi
+
+        git checkout -f -B rules "$RULES_BASE_REF"
+        mkdir -p ./rule
+        cp "$TMP_RULE_DIR"/*.json ./rule/
+        cp "$TMP_RULE_DIR"/*.srs ./rule/
+        cp "$TMP_RULE_DIR"/*.txt ./rule/
+
+        git add ./rule/*.json
+        git add ./rule/*.srs
+        git add ./rule/*.txt
+
+        if git diff --staged --quiet; then
+          echo "No changes to commit"
+          exit 0
+        fi
+
+        git commit -m "Update rules"
+        RULES_COMMIT="$(git rev-parse HEAD)"
+
+        if [ "$RULES_FORCE_PUSH" = "true" ]; then
+          git push --force-with-lease origin HEAD:rules
+        else
+          git push origin HEAD:rules
+        fi
+
+        # Recreate latest_rules as a single latest snapshot commit.
+        git checkout --orphan latest_rules
+        git rm -rf . >/dev/null 2>&1 || true
+        git checkout "$RULES_COMMIT" -- .
+        git add ./rule/*.json
+        git add ./rule/*.srs
+        git add ./rule/*.txt
+        git commit -m "Update latest rules"
+        git push --force origin HEAD:latest_rules
